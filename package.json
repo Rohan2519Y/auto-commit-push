@@ -26,7 +26,7 @@
       "properties": {
         "autoCommitPush.timeoutMinutes": {
           "type": "number",
-          "default": 1,
+          "default": 15,
           "description": "Inactivity timeout in minutes"
         },
         "autoCommitPush.defaultCommitMessage": {
