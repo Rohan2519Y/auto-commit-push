@@ -5,7 +5,9 @@
       "type": "npm",
       "script": "compile",
       "group": "build",
-      "problemMatcher": []
+      "problemMatcher": [],
+      "label": "npm: compile",
+      "detail": "tsc -p ./"
     }
   ]
 }
