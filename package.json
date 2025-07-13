@@ -1,18 +1,14 @@
 {
   "name": "auto-commit-push",
   "displayName": "Auto Commit and Push",
-  "description": "Automatically commit and push changes after configurable inactivity period",
-  "version": "1.0.1",
+  "description": "Automatically commit and push changes after 1 minute of inactivity",
+  "version": "1.0.0",
   "publisher": "YourName",
   "engines": {
     "vscode": "^1.60.0"
   },
-  "categories": [
-    "Other"
-  ],
-  "activationEvents": [
-    "*"
-  ],
+  "categories": ["Other"],
+  "activationEvents": ["*"],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -23,15 +19,38 @@
       {
         "command": "autoCommitPush.triggerNow",
         "title": "Trigger Commit/Push Now"
+      },
+      {
+        "command": "autoCommitPush.startForFolder",
+        "title": "Start Auto-Commit for Folder",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "autoCommitPush.stopForFolder",
+        "title": "Stop Auto-Commit for Folder",
+        "icon": "$(stop)"
       }
     ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "autoCommitPush.startForFolder",
+          "group": "navigation",
+          "when": "resourceIsFolder"
+        },
+        {
+          "command": "autoCommitPush.stopForFolder",
+          "group": "navigation",
+          "when": "resourceIsFolder"
+        }
+      ]
+    },
     "configuration": {
       "title": "Auto Commit/Push",
       "properties": {
         "autoCommitPush.timeoutMinutes": {
           "type": "number",
           "default": 1,
-          "minimum": 1,
           "description": "Inactivity timeout in minutes"
         },
         "autoCommitPush.defaultCommitMessage": {
@@ -43,11 +62,6 @@
           "type": "boolean",
           "default": true,
           "description": "Show operation notifications"
-        },
-        "autoCommitPush.enableDetailedLogging": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show detailed logs in output channel"
         }
       }
     }
@@ -58,11 +72,11 @@
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
-    "@types/node": "^20.11.5",
+    "@types/node": "^14.14.41",
     "@types/vscode": "^1.60.0",
-    "typescript": "^5.3.3"
+    "typescript": "^4.3.5"
   },
   "dependencies": {
-    "simple-git": "^3.28.0"
+    "simple-git": "^3.7.1"
   }
 }
