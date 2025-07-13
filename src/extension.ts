@@ -1,12 +1,20 @@
 import * as vscode from 'vscode';
 import * as utils from './utils';
 import simpleGit, { SimpleGit, StatusResult, PushResult } from 'simple-git';
+import * as path from 'path';
+import * as fs from 'fs';
+import { spawn } from 'child_process';
 
 interface ExtensionConfig {
   timeoutMinutes: number;
   defaultCommitMessage: string;
   enableNotifications: boolean;
-  enableDetailedLogging: boolean;
+}
+
+interface AutoCommitProcess {
+  folder: string;
+  process: any;
+  outputChannel: vscode.OutputChannel;
 }
 
 let timeout: NodeJS.Timeout | undefined;
@@ -17,6 +25,7 @@ let nextCommitTime: Date | undefined;
 let countdownInterval: NodeJS.Timeout | undefined;
 let lastActivityTime: number = Date.now();
 let backgroundInterval: NodeJS.Timeout | undefined;
+let activeProcesses: Map<string, AutoCommitProcess> = new Map();
 
 function createOutputChannel() {
   if (!outputChannel) {
@@ -84,6 +93,78 @@ function startBackgroundMonitoring(getConfig: () => ExtensionConfig, commitAndPu
   return backgroundInterval;
 }
 
+async function startAutoCommitForFolder(folderPath: string) {
+  try {
+    // Check if already running for this folder
+    if (activeProcesses.has(folderPath)) {
+      vscode.window.showInformationMessage(`Auto-commit already running for: ${path.basename(folderPath)}`);
+      return;
+    }
+
+    // Check if it's a git repository
+    const git = simpleGit(folderPath);
+    const isRepo = await git.checkIsRepo();
+    if (!isRepo) {
+      vscode.window.showErrorMessage(`${path.basename(folderPath)} is not a git repository`);
+      return;
+    }
+
+    // Create output channel for this folder
+    const outputChannel = vscode.window.createOutputChannel(`Auto-Commit: ${path.basename(folderPath)}`);
+    
+    // Start the background script for this folder
+    const scriptPath = path.join(__dirname, '..', 'auto-commit-global.js');
+    const childProcess = spawn('node', [scriptPath, folderPath], {
+      cwd: __dirname,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    // Handle output
+    childProcess.stdout.on('data', (data) => {
+      outputChannel.append(data.toString());
+    });
+
+    childProcess.stderr.on('data', (data) => {
+      outputChannel.appendLine(`Error: ${data.toString()}`);
+    });
+
+    childProcess.on('close', (code) => {
+      outputChannel.appendLine(`Process ended with code ${code}`);
+      activeProcesses.delete(folderPath);
+    });
+
+    // Store the process
+    activeProcesses.set(folderPath, {
+      folder: folderPath,
+      process: childProcess,
+      outputChannel: outputChannel
+    });
+
+    outputChannel.show();
+    vscode.window.showInformationMessage(`Started auto-commit for: ${path.basename(folderPath)}`);
+
+  } catch (error: any) {
+    vscode.window.showErrorMessage(`Failed to start auto-commit: ${error.message}`);
+  }
+}
+
+async function stopAutoCommitForFolder(folderPath: string) {
+  const process = activeProcesses.get(folderPath);
+  if (!process) {
+    vscode.window.showInformationMessage(`No auto-commit process found for: ${path.basename(folderPath)}`);
+    return;
+  }
+
+  try {
+    process.process.kill();
+    process.outputChannel.appendLine('Process stopped by user');
+    activeProcesses.delete(folderPath);
+    vscode.window.showInformationMessage(`Stopped auto-commit for: ${path.basename(folderPath)}`);
+  } catch (error: any) {
+    vscode.window.showErrorMessage(`Failed to stop auto-commit: ${error.message}`);
+  }
+}
+
 export function activate(context: vscode.ExtensionContext) {
   createOutputChannel();
   logMessage('Extension activated');
@@ -143,6 +224,23 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  // Register context menu commands
+  context.subscriptions.push(
+    vscode.commands.registerCommand('autoCommitPush.startForFolder', async (uri: vscode.Uri) => {
+      if (uri && uri.fsPath) {
+        await startAutoCommitForFolder(uri.fsPath);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('autoCommitPush.stopForFolder', async (uri: vscode.Uri) => {
+      if (uri && uri.fsPath) {
+        await stopAutoCommitForFolder(uri.fsPath);
+      }
+    })
+  );
+
   // Track user activity with more comprehensive event listeners
   const activityEvents = [
     vscode.window.onDidChangeActiveTextEditor,
@@ -199,10 +297,9 @@ export function activate(context: vscode.ExtensionContext) {
   function getConfig(): ExtensionConfig {
     const config = vscode.workspace.getConfiguration('autoCommitPush');
     return {
-      timeoutMinutes: config.get<number>('timeoutMinutes', 10),
+      timeoutMinutes: config.get<number>('timeoutMinutes', 1),
       defaultCommitMessage: config.get<string>('defaultCommitMessage', 'Auto-save changes'),
-      enableNotifications: config.get<boolean>('enableNotifications', true),
-      enableDetailedLogging: config.get<boolean>('enableDetailedLogging', false)
+      enableNotifications: config.get<boolean>('enableNotifications', true)
     };
   }
 
@@ -312,6 +409,17 @@ export function deactivate() {
   if (backgroundInterval) {
     clearInterval(backgroundInterval);
   }
+  
+  // Stop all active processes
+  activeProcesses.forEach((process, folder) => {
+    try {
+      process.process.kill();
+    } catch (error) {
+      // Ignore errors when stopping processes
+    }
+  });
+  activeProcesses.clear();
+  
   if (outputChannel) {
     outputChannel.appendLine('Extension deactivated');
     outputChannel.dispose();
