@@ -50,17 +50,12 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const utils = __importStar(require("./utils"));
 const simple_git_1 = __importDefault(require("simple-git"));
-const path = __importStar(require("path"));
-const child_process_1 = require("child_process");
-let timeout;
+let intervalTimer;
 let lastCommitMessage = '';
 let outputChannel;
 let statusBarItem;
 let nextCommitTime;
 let countdownInterval;
-let lastActivityTime = Date.now();
-let backgroundInterval;
-let activeProcesses = new Map();
 function createOutputChannel() {
     if (!outputChannel) {
         outputChannel = vscode.window.createOutputChannel('Auto Commit/Push');
@@ -96,90 +91,6 @@ function updateCountdownDisplay() {
     statusBarItem.backgroundColor = undefined;
     statusBarItem.show();
 }
-function startBackgroundMonitoring(getConfig, commitAndPushChanges) {
-    // Clear existing background interval if any
-    if (backgroundInterval) {
-        clearInterval(backgroundInterval);
-    }
-    // Set up interval to check for timeout every 30 seconds
-    backgroundInterval = setInterval(() => {
-        const config = getConfig();
-        const now = Date.now();
-        const timeSinceLastActivity = now - lastActivityTime;
-        const timeoutMs = config.timeoutMinutes * 60 * 1000;
-        if (timeSinceLastActivity >= timeoutMs) {
-            logMessage(`Background timeout reached (${config.timeoutMinutes} minutes of inactivity)`);
-            commitAndPushChanges();
-        }
-    }, 30000); // Check every 30 seconds
-    return backgroundInterval;
-}
-function startAutoCommitForFolder(folderPath) {
-    return __awaiter(this, void 0, void 0, function* () {
-        try {
-            // Check if already running for this folder
-            if (activeProcesses.has(folderPath)) {
-                vscode.window.showInformationMessage(`Auto-commit already running for: ${path.basename(folderPath)}`);
-                return;
-            }
-            // Check if it's a git repository
-            const git = (0, simple_git_1.default)(folderPath);
-            const isRepo = yield git.checkIsRepo();
-            if (!isRepo) {
-                vscode.window.showErrorMessage(`${path.basename(folderPath)} is not a git repository`);
-                return;
-            }
-            // Create output channel for this folder
-            const outputChannel = vscode.window.createOutputChannel(`Auto-Commit: ${path.basename(folderPath)}`);
-            // Start the background script for this folder
-            const scriptPath = path.join(__dirname, '..', 'auto-commit-global.js');
-            const childProcess = (0, child_process_1.spawn)('node', [scriptPath, folderPath], {
-                cwd: __dirname,
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
-            // Handle output
-            childProcess.stdout.on('data', (data) => {
-                outputChannel.append(data.toString());
-            });
-            childProcess.stderr.on('data', (data) => {
-                outputChannel.appendLine(`Error: ${data.toString()}`);
-            });
-            childProcess.on('close', (code) => {
-                outputChannel.appendLine(`Process ended with code ${code}`);
-                activeProcesses.delete(folderPath);
-            });
-            // Store the process
-            activeProcesses.set(folderPath, {
-                folder: folderPath,
-                process: childProcess,
-                outputChannel: outputChannel
-            });
-            outputChannel.show();
-            vscode.window.showInformationMessage(`Started auto-commit for: ${path.basename(folderPath)}`);
-        }
-        catch (error) {
-            vscode.window.showErrorMessage(`Failed to start auto-commit: ${error.message}`);
-        }
-    });
-}
-function stopAutoCommitForFolder(folderPath) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const process = activeProcesses.get(folderPath);
-        if (!process) {
-            vscode.window.showInformationMessage(`No auto-commit process found for: ${path.basename(folderPath)}`);
-            return;
-        }
-        try {
-            process.process.kill();
-            process.outputChannel.appendLine('Process stopped by user');
-            activeProcesses.delete(folderPath);
-            vscode.window.showInformationMessage(`Stopped auto-commit for: ${path.basename(folderPath)}`);
-        }
-        catch (error) {
-            vscode.window.showErrorMessage(`Failed to stop auto-commit: ${error.message}`);
-        }
-    });
-}
 function activate(context) {
     createOutputChannel();
     logMessage('Extension activated');
@@ -201,17 +112,8 @@ function activate(context) {
     lastCommitMessage = config.defaultCommitMessage;
     logMessage(`Initial timeout: ${config.timeoutMinutes} minutes`);
     logMessage(`Default commit message: "${lastCommitMessage}"`);
-    // Start background monitoring
-    const backgroundInterval = startBackgroundMonitoring(getConfig, commitAndPushChanges);
-    context.subscriptions.push({
-        dispose: () => {
-            if (backgroundInterval) {
-                clearInterval(backgroundInterval);
-            }
-        }
-    });
-    // Start initial timer
-    resetTimer();
+    // Start fixed interval timer (does NOT reset on activity)
+    startFixedIntervalTimer();
     // Register commands
     context.subscriptions.push(vscode.commands.registerCommand('autoCommitPush.updateCommitMessage', () => __awaiter(this, void 0, void 0, function* () {
         const newMessage = yield vscode.window.showInputBox({
@@ -227,91 +129,46 @@ function activate(context) {
         showMessage('Manual trigger activated');
         commitAndPushChanges();
     }));
-    // Register context menu commands
-    context.subscriptions.push(vscode.commands.registerCommand('autoCommitPush.startForFolder', (uri) => __awaiter(this, void 0, void 0, function* () {
-        if (uri && uri.fsPath) {
-            yield startAutoCommitForFolder(uri.fsPath);
-        }
-    })));
-    context.subscriptions.push(vscode.commands.registerCommand('autoCommitPush.stopForFolder', (uri) => __awaiter(this, void 0, void 0, function* () {
-        if (uri && uri.fsPath) {
-            yield stopAutoCommitForFolder(uri.fsPath);
-        }
-    })));
-    // Track user activity with more comprehensive event listeners
-    const activityEvents = [
-        vscode.window.onDidChangeActiveTextEditor,
-        vscode.workspace.onDidChangeTextDocument,
-        vscode.window.onDidChangeWindowState,
-        vscode.window.onDidChangeTextEditorSelection,
-        vscode.window.onDidChangeTextEditorVisibleRanges,
-        vscode.workspace.onDidSaveTextDocument,
-        vscode.workspace.onDidCreateFiles,
-        vscode.workspace.onDidDeleteFiles,
-        vscode.workspace.onDidRenameFiles
-    ];
-    activityEvents.forEach(event => {
-        context.subscriptions.push(event(() => {
-            logMessage('User activity detected - resetting timer');
-            lastActivityTime = Date.now();
-            resetTimer();
-        }));
-    });
-    // Handle window focus events specifically
-    context.subscriptions.push(vscode.window.onDidChangeWindowState((e) => {
-        if (e.focused) {
-            logMessage('Window focused - checking for missed commits');
-            // When window becomes focused, check if we missed any commits
-            const config = getConfig();
-            const now = Date.now();
-            const timeSinceLastActivity = now - lastActivityTime;
-            const timeoutMs = config.timeoutMinutes * 60 * 1000;
-            if (timeSinceLastActivity >= timeoutMs) {
-                logMessage('Window focused after timeout period - triggering commit');
-                commitAndPushChanges();
-            }
-            else {
-                logMessage('Window focused - updating display');
-                updateCountdownDisplay();
-            }
-        }
-        else {
-            logMessage('Window lost focus - continuing background monitoring');
-        }
-    }));
+    // No event listeners for user activity!
     // Handle configuration changes
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('autoCommitPush')) {
             const newConfig = getConfig();
-            logMessage('Configuration changed - resetting timer');
+            logMessage('Configuration changed - restarting timer');
             lastCommitMessage = newConfig.defaultCommitMessage;
-            resetTimer();
+            restartFixedIntervalTimer();
         }
     }));
     function getConfig() {
         const config = vscode.workspace.getConfiguration('autoCommitPush');
         return {
-            timeoutMinutes: config.get('timeoutMinutes', 1),
+            timeoutMinutes: config.get('timeoutMinutes', 10),
             defaultCommitMessage: config.get('defaultCommitMessage', 'Auto-save changes'),
-            enableNotifications: config.get('enableNotifications', true)
+            enableNotifications: config.get('enableNotifications', true),
+            enableDetailedLogging: config.get('enableDetailedLogging', false)
         };
     }
-    function resetTimer() {
+    function startFixedIntervalTimer() {
         const config = getConfig();
-        if (timeout) {
-            clearTimeout(timeout);
-            logMessage('Cleared existing timer');
+        if (intervalTimer) {
+            clearInterval(intervalTimer);
         }
-        // Update last activity time
-        lastActivityTime = Date.now();
-        // Calculate next commit time
-        nextCommitTime = new Date(Date.now() + config.timeoutMinutes * 60000);
-        updateCountdownDisplay();
-        timeout = setTimeout(() => {
-            logMessage(`Timeout reached (${config.timeoutMinutes} minutes)`);
+        setNextCommitTime(config.timeoutMinutes);
+        intervalTimer = setInterval(() => {
+            setNextCommitTime(config.timeoutMinutes);
             commitAndPushChanges();
         }, config.timeoutMinutes * 60000);
-        logMessage(`New timer set for ${config.timeoutMinutes} minutes`);
+        logMessage(`Fixed interval timer started for every ${config.timeoutMinutes} minutes`);
+    }
+    function restartFixedIntervalTimer() {
+        if (intervalTimer) {
+            clearInterval(intervalTimer);
+        }
+        startFixedIntervalTimer();
+    }
+    function setNextCommitTime(minutes) {
+        nextCommitTime = new Date(Date.now() + minutes * 60000);
+        updateCountdownDisplay();
     }
     function commitAndPushChanges() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -338,7 +195,6 @@ function activate(context) {
                 if (status.files.length === 0) {
                     logMessage('No changes to commit');
                     showMessage('No changes to commit');
-                    resetTimer();
                     return;
                 }
                 // Stage and commit
@@ -362,9 +218,6 @@ function activate(context) {
                 logMessage(errorMsg, true);
                 showMessage(errorMsg, true);
             }
-            finally {
-                resetTimer();
-            }
         });
     }
     function showMessage(message, isError = false) {
@@ -381,28 +234,18 @@ function activate(context) {
     }
 }
 function deactivate() {
-    if (timeout) {
-        clearTimeout(timeout);
+    if (intervalTimer) {
+        clearInterval(intervalTimer);
     }
     if (countdownInterval) {
         clearInterval(countdownInterval);
     }
-    if (backgroundInterval) {
-        clearInterval(backgroundInterval);
-    }
-    // Stop all active processes
-    activeProcesses.forEach((process, folder) => {
-        try {
-            process.process.kill();
-        }
-        catch (error) {
-            // Ignore errors when stopping processes
-        }
-    });
-    activeProcesses.clear();
     if (outputChannel) {
         outputChannel.appendLine('Extension deactivated');
         outputChannel.dispose();
+    }
+    if (statusBarItem) {
+        statusBarItem.dispose();
     }
 }
 //# sourceMappingURL=extension.js.map
